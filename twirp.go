@@ -47,18 +47,10 @@ const (
 )
 
 var (
-	once                sync.Once
-	_twirpStubRegistery registry
-	initOnce            = func() {
-		_twirpStubRegistery = registry{
-			pools: sync.Map{},
-		}
+	_twirpStubRegistery = registry{
+		pools: sync.Map{},
 	}
 )
-
-func init() {
-	once.Do(initOnce)
-}
 
 func RegisterTwirpStubs(l logging.Logger, stubs ...LuraTwirpStub) {
 	for _, stub := range stubs {

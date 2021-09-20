@@ -60,9 +60,10 @@ func init() {
 	once.Do(initOnce)
 }
 
-func RegisterTwirpStubs(stubs ...LuraTwirpStub) {
+func RegisterTwirpStubs(l logging.Logger, stubs ...LuraTwirpStub) {
 	for _, stub := range stubs {
 		_twirpStubRegistery.pools.Store(stub.Identifier(), stub)
+		l.Info("twirp: register new stub", stub.Identifier())
 	}
 }
 
@@ -75,7 +76,7 @@ func NewTwirpProxy(l logging.Logger, f proxy.BackendFactory) proxy.BackendFactor
 		}
 
 		return func(ctx context.Context, request *proxy.Request) (*proxy.Response, error) {
-			resp, err := callService(ctx, request, bo)
+			resp, err := callService(ctx, request, bo, l)
 			request.Body.Close()
 			if err != nil {
 				l.Warning("gRPC calling the next mw:", err.Error())
@@ -95,15 +96,17 @@ func getOptions(remote *config.Backend) *twirpBackendOptions {
 	}
 }
 
-func callService(ctx context.Context, request *proxy.Request, opts *twirpBackendOptions) (*proxy.Response, error) {
+func callService(ctx context.Context, request *proxy.Request, opts *twirpBackendOptions, l logging.Logger) (*proxy.Response, error) {
 	caller := func(ctx context.Context, req *proxy.Request) (*proxy.Response, error) {
 		registredItem, ok := _twirpStubRegistery.pools.Load(opts.serviceIdentifier)
 		if !ok {
+			l.Warning("twirp: stub not found for service", opts.serviceIdentifier)
 			return nil, _errInvalidTwirpClientIdentifier
 		}
 
 		stub, ok := registredItem.(LuraTwirpStub)
 		if !ok {
+			l.Warning("twirp: stub is not implemeted LuraTwirpStub interface", opts.serviceIdentifier)
 			return nil, _errInvalidTwirpClientIdentifier
 		}
 

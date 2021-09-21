@@ -1,5 +1,5 @@
 package luratwirp
 
 const (
-	Namespace = "github.com/kyawmyintthein/twirp-lura/martian"
+	Namespace = "github.com/kyawmyintthein/lura-twirp/martian"
 )

@@ -150,7 +150,7 @@ func NewConfiguredBackendFactory(l logging.Logger, ref func(*config.Backend) cli
 		switch result.Err {
 		case nil:
 			return proxy.NewHTTPProxyWithHTTPExecutor(remote, HTTPRequestExecutor(result.Result, re), remote.Decoder)
-		case ErrEmptyValue:
+		case _errEmptyValue:
 			return proxy.NewHTTPProxyWithHTTPExecutor(remote, re, remote.Decoder)
 		default:
 			l.Error(result, remote.ExtraConfig)
@@ -162,17 +162,17 @@ func NewConfiguredBackendFactory(l logging.Logger, ref func(*config.Backend) cli
 func getConfig(e config.ExtraConfig) interface{} {
 	cfg, ok := e[Namespace]
 	if !ok {
-		return result{nil, ErrEmptyValue}
+		return result{nil, _errEmptyValue}
 	}
 
 	data, ok := cfg.(map[string]interface{})
 	if !ok {
-		return result{nil, ErrBadValue}
+		return result{nil, _errBadValue}
 	}
 
 	raw, err := json.Marshal(data)
 	if err != nil {
-		return result{nil, ErrMarshallingValue}
+		return result{nil, _errMarshallingValue}
 	}
 
 	r, err := parse.FromJSON(raw)
@@ -278,7 +278,7 @@ func HTTPRequestExecutor(result *parse.Result, re client.HTTPRequestExecutor) cl
 				return
 			}
 			if resp == nil {
-				err = ErrEmptyResponse
+				err = _errEmptyResponse
 				return
 			}
 		} else if resp == nil {

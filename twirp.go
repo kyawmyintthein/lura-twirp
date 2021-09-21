@@ -19,6 +19,16 @@ import (
 	"github.com/luraproject/lura/transport/http/client"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+
+	_ "github.com/google/martian/body"
+	_ "github.com/google/martian/cookie"
+	_ "github.com/google/martian/fifo"
+	_ "github.com/google/martian/header"
+	_ "github.com/google/martian/martianurl"
+	_ "github.com/google/martian/port"
+	_ "github.com/google/martian/priority"
+	_ "github.com/google/martian/stash"
+	_ "github.com/google/martian/status"
 )
 
 type (
@@ -117,6 +127,8 @@ func NewConfiguredBackendFactory(l logging.Logger, ref func(*config.Backend) cli
 							return nil, err
 						}
 					}
+				default:
+					l.Error(result.Err, "parser.ResultError", result, remote.ExtraConfig)
 				}
 
 				request.Body.Close()

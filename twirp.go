@@ -1,17 +1,22 @@
 package luratwirp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/google/martian"
+	"github.com/google/martian/parse"
 	"github.com/luraproject/lura/config"
 	"github.com/luraproject/lura/logging"
 	"github.com/luraproject/lura/proxy"
+	"github.com/luraproject/lura/transport/http/client"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
@@ -37,6 +42,11 @@ type (
 		serviceIdentifier string
 	}
 
+	result struct {
+		Result *parse.Result
+		Err    error
+	}
+
 	registry struct {
 		pools sync.Map
 	}
@@ -59,27 +69,102 @@ func RegisterTwirpStubs(l logging.Logger, stubs ...LuraTwirpStub) {
 	}
 }
 
-func NewTwirpProxy(l logging.Logger, f proxy.BackendFactory) proxy.BackendFactory {
+func NewTwirpProxy(logger logging.Logger, re client.HTTPRequestExecutor) proxy.BackendFactory {
+	return NewConfiguredBackendFactory(logger, func(_ *config.Backend) client.HTTPRequestExecutor { return re })
+}
+
+func NewConfiguredBackendFactory(l logging.Logger, ref func(*config.Backend) client.HTTPRequestExecutor) proxy.BackendFactory {
 	return func(remote *config.Backend) proxy.Proxy {
-		bo := getOptions(remote)
-		if bo == nil {
-			log.Println("twirp: client factory is not used for", remote)
-			return f(remote)
+		re := ref(remote)
+		_, isTwirpCall := remote.ExtraConfig[TwirpServiceIdentifierConst]
+		if isTwirpCall {
+			twirpOpt := getTwirpOptions(remote)
+			if twirpOpt == nil {
+				log.Println("twirp: client factory is not used for", remote)
+				return proxy.NewHTTPProxyWithHTTPExecutor(remote, re, remote.Decoder)
+			}
+
+			result, ok := getConfig(remote.ExtraConfig).(result)
+			if !ok {
+				return func(ctx context.Context, request *proxy.Request) (*proxy.Response, error) {
+					req, err := convertProxyRequest2HttpRequest(request)
+					if err != nil {
+						return nil, err
+					}
+					request.Body.Close()
+					resp, err := callService(ctx, req, twirpOpt, l)
+					req.Body.Close()
+					if err != nil {
+						l.Warning("gRPC calling the next mw:", err.Error())
+						return nil, err
+					}
+					return resp, err
+				}
+			}
+
+			return func(ctx context.Context, request *proxy.Request) (*proxy.Response, error) {
+				req, err := convertProxyRequest2HttpRequest(request)
+				if err != nil {
+					return nil, err
+				}
+
+				mod := result.Result.RequestModifier()
+				if mod != nil {
+					err = mod.ModifyRequest(req)
+					if err != nil {
+						return nil, err
+					}
+				}
+				request.Body.Close()
+				resp, err := callService(ctx, req, twirpOpt, l)
+				req.Body.Close()
+				if err != nil {
+					l.Warning("gRPC calling the next mw:", err.Error())
+					return nil, err
+				}
+				return resp, err
+			}
 		}
 
-		return func(ctx context.Context, request *proxy.Request) (*proxy.Response, error) {
-			resp, err := callService(ctx, request, bo, l)
-			request.Body.Close()
-			if err != nil {
-				l.Warning("gRPC calling the next mw:", err.Error())
-				return nil, err
-			}
-			return resp, err
+		// HTTP call
+		result, ok := getConfig(remote.ExtraConfig).(result)
+		if !ok {
+			return proxy.NewHTTPProxyWithHTTPExecutor(remote, re, remote.Decoder)
+		}
+		switch result.Err {
+		case nil:
+			return proxy.NewHTTPProxyWithHTTPExecutor(remote, HTTPRequestExecutor(result.Result, re), remote.Decoder)
+		case ErrEmptyValue:
+			return proxy.NewHTTPProxyWithHTTPExecutor(remote, re, remote.Decoder)
+		default:
+			l.Error(result, remote.ExtraConfig)
+			return proxy.NewHTTPProxyWithHTTPExecutor(remote, re, remote.Decoder)
 		}
 	}
 }
 
-func getOptions(remote *config.Backend) *twirpBackendOptions {
+func getConfig(e config.ExtraConfig) interface{} {
+	cfg, ok := e[Namespace]
+	if !ok {
+		return result{nil, ErrEmptyValue}
+	}
+
+	data, ok := cfg.(map[string]interface{})
+	if !ok {
+		return result{nil, ErrBadValue}
+	}
+
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return result{nil, ErrMarshallingValue}
+	}
+
+	r, err := parse.FromJSON(raw)
+
+	return result{r, err}
+}
+
+func getTwirpOptions(remote *config.Backend) *twirpBackendOptions {
 	identifier, _ := remote.ExtraConfig[TwirpServiceIdentifierConst].(string)
 	return &twirpBackendOptions{
 		method:            remote.Method,
@@ -88,8 +173,8 @@ func getOptions(remote *config.Backend) *twirpBackendOptions {
 	}
 }
 
-func callService(ctx context.Context, request *proxy.Request, opts *twirpBackendOptions, l logging.Logger) (*proxy.Response, error) {
-	caller := func(ctx context.Context, req *proxy.Request) (*proxy.Response, error) {
+func callService(ctx context.Context, request *http.Request, opts *twirpBackendOptions, l logging.Logger) (*proxy.Response, error) {
+	caller := func(ctx context.Context, req *http.Request) (*proxy.Response, error) {
 		registredItem, ok := _twirpStubRegistery.pools.Load(opts.serviceIdentifier)
 		if !ok {
 			l.Warning("twirp: stub not found for service", opts.serviceIdentifier)
@@ -136,4 +221,91 @@ func callService(ctx context.Context, request *proxy.Request, opts *twirpBackend
 		}, err
 	}
 	return caller(ctx, request)
+}
+
+func convertProxyRequest2HttpRequest(request *proxy.Request) (*http.Request, error) {
+
+	requestToBakend, err := http.NewRequest(strings.ToTitle(request.Method), request.URL.String(), request.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	requestToBakend.Header = make(map[string][]string, len(request.Headers))
+	for k, vs := range request.Headers {
+		tmp := make([]string, len(vs))
+		copy(tmp, vs)
+		requestToBakend.Header[k] = tmp
+	}
+	if request.Body != nil {
+		if v, ok := request.Headers["Content-Length"]; ok && len(v) == 1 && v[0] != "chunked" {
+			if size, err := strconv.Atoi(v[0]); err == nil {
+				requestToBakend.ContentLength = int64(size)
+			}
+		}
+	}
+
+	return requestToBakend, nil
+}
+
+// HTTPRequestExecutor creates a wrapper over the received request executor, so the martian modifiers can be
+// executed before and after the execution of the request
+func HTTPRequestExecutor(result *parse.Result, re client.HTTPRequestExecutor) client.HTTPRequestExecutor {
+	return func(ctx context.Context, req *http.Request) (resp *http.Response, err error) {
+		if err = modifyRequest(result.RequestModifier(), req); err != nil {
+			return
+		}
+
+		mctx, ok := req.Context().(*Context)
+		if !ok || !mctx.SkippingRoundTrip() {
+			resp, err = re(ctx, req)
+			if err != nil {
+				return
+			}
+			if resp == nil {
+				err = ErrEmptyResponse
+				return
+			}
+		} else if resp == nil {
+			resp = &http.Response{
+				Request:    req,
+				Header:     http.Header{},
+				StatusCode: http.StatusOK,
+				Body:       ioutil.NopCloser(bytes.NewBufferString("")),
+			}
+		}
+
+		err = modifyResponse(result.ResponseModifier(), resp)
+		return
+	}
+}
+
+func modifyRequest(mod martian.RequestModifier, req *http.Request) error {
+	if req.Body == nil {
+		req.Body = ioutil.NopCloser(bytes.NewBufferString(""))
+	}
+	if req.Header == nil {
+		req.Header = http.Header{}
+	}
+
+	if mod == nil {
+		return nil
+	}
+	return mod.ModifyRequest(req)
+}
+
+func modifyResponse(mod martian.ResponseModifier, resp *http.Response) error {
+	if resp.Body == nil {
+		resp.Body = ioutil.NopCloser(bytes.NewBufferString(""))
+	}
+	if resp.Header == nil {
+		resp.Header = http.Header{}
+	}
+	if resp.StatusCode == 0 {
+		resp.StatusCode = http.StatusOK
+	}
+
+	if mod == nil {
+		return nil
+	}
+	return mod.ModifyResponse(resp)
 }

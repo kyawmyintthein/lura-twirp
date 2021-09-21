@@ -108,13 +108,17 @@ func NewConfiguredBackendFactory(l logging.Logger, ref func(*config.Backend) cli
 					return nil, err
 				}
 
-				mod := result.Result.RequestModifier()
-				if mod != nil {
-					err = mod.ModifyRequest(req)
-					if err != nil {
-						return nil, err
+				switch result.Err {
+				case nil:
+					mod := result.Result.RequestModifier()
+					if mod != nil {
+						err = mod.ModifyRequest(req)
+						if err != nil {
+							return nil, err
+						}
 					}
 				}
+
 				request.Body.Close()
 				resp, err := callService(ctx, req, twirpOpt, l)
 				req.Body.Close()

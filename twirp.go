@@ -134,23 +134,24 @@ func NewConfiguredBackendFactory(l logging.Logger, ref func(*config.Backend) cli
 				if reqMod != nil {
 					err = reqMod.ModifyRequest(req)
 					if err != nil {
+						l.Error(err, "failed to modify request")
 						return nil, err
 					}
 				}
 
-				request.Body.Close()
 				resp, err := callService(ctx, req, twirpOpt, l)
+				request.Body.Close()
 				req.Body.Close()
 				if err != nil {
-					l.Warning("gRPC calling the next mw:", err.Error())
+					l.Warning("RPC calling the next mw:", err.Error())
 					return nil, err
 				}
 
 				err = modifyProxyResponse(respMod, req, resp)
 				if err != nil {
+					l.Error(err, "failed to modify response")
 					return resp, err
 				}
-
 				return resp, err
 			}
 		}
@@ -326,9 +327,11 @@ func modifyResponse(mod martian.ResponseModifier, resp *http.Response) error {
 	if resp.Body == nil {
 		resp.Body = ioutil.NopCloser(bytes.NewBufferString(""))
 	}
+
 	if resp.Header == nil {
 		resp.Header = http.Header{}
 	}
+
 	if resp.StatusCode == 0 {
 		resp.StatusCode = http.StatusOK
 	}
@@ -336,6 +339,7 @@ func modifyResponse(mod martian.ResponseModifier, resp *http.Response) error {
 	if mod == nil {
 		return nil
 	}
+
 	return mod.ModifyResponse(resp)
 }
 
@@ -351,9 +355,11 @@ func modifyProxyResponse(mod martian.ResponseModifier, request *http.Request, re
 		StatusCode: resp.Metadata.StatusCode,
 		Header:     resp.Metadata.Headers,
 	}
+
 	if mod == nil {
 		return nil
 	}
+
 	err = mod.ModifyResponse(&httpResponse)
 	if err != nil {
 		return err
@@ -362,6 +368,10 @@ func modifyProxyResponse(mod martian.ResponseModifier, request *http.Request, re
 	modifiedResponseBytes, err := ioutil.ReadAll(httpResponse.Body)
 	if err != nil {
 		return err
+	}
+
+	if len(modifiedResponseBytes) <= 0 {
+		modifiedResponseBytes = []byte(`{}`)
 	}
 
 	var data map[string]interface{}

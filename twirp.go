@@ -118,17 +118,24 @@ func NewConfiguredBackendFactory(l logging.Logger, ref func(*config.Backend) cli
 					return nil, err
 				}
 
+				var (
+					reqMod  martian.RequestModifier
+					respMod martian.ResponseModifier
+				)
+
 				switch result.Err {
 				case nil:
-					mod := result.Result.RequestModifier()
-					if mod != nil {
-						err = mod.ModifyRequest(req)
-						if err != nil {
-							return nil, err
-						}
-					}
+					reqMod = result.Result.RequestModifier()
+					respMod = result.Result.ResponseModifier()
 				default:
 					l.Error(result.Err, "parser.ResultError", result, remote.ExtraConfig)
+				}
+
+				if reqMod != nil {
+					err = reqMod.ModifyRequest(req)
+					if err != nil {
+						return nil, err
+					}
 				}
 
 				request.Body.Close()
@@ -138,6 +145,12 @@ func NewConfiguredBackendFactory(l logging.Logger, ref func(*config.Backend) cli
 					l.Warning("gRPC calling the next mw:", err.Error())
 					return nil, err
 				}
+
+				err = modifyProxyResponse(respMod, req, resp)
+				if err != nil {
+					return resp, err
+				}
+
 				return resp, err
 			}
 		}
@@ -324,4 +337,42 @@ func modifyResponse(mod martian.ResponseModifier, resp *http.Response) error {
 		return nil
 	}
 	return mod.ModifyResponse(resp)
+}
+
+func modifyProxyResponse(mod martian.ResponseModifier, request *http.Request, resp *proxy.Response) error {
+	bodyBytes, err := json.Marshal(resp.Data)
+	if err != nil {
+		return err
+	}
+
+	httpResponse := http.Response{
+		Request:    request,
+		Body:       ioutil.NopCloser(bytes.NewBuffer(bodyBytes)),
+		StatusCode: resp.Metadata.StatusCode,
+		Header:     resp.Metadata.Headers,
+	}
+	if mod == nil {
+		return nil
+	}
+	err = mod.ModifyResponse(&httpResponse)
+	if err != nil {
+		return err
+	}
+
+	modifiedResponseBytes, err := ioutil.ReadAll(httpResponse.Body)
+	if err != nil {
+		return err
+	}
+
+	var data map[string]interface{}
+	err = json.Unmarshal(modifiedResponseBytes, &data)
+	if err != nil {
+		return err
+	}
+
+	resp.Data = data
+	resp.Metadata.Headers = httpResponse.Header
+	resp.Metadata.StatusCode = httpResponse.StatusCode
+	resp.IsComplete = true
+	return nil
 }

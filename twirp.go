@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/martian"
 	"github.com/google/martian/parse"
@@ -88,6 +89,11 @@ func NewConfiguredBackendFactory(l logging.Logger, ref func(*config.Backend) cli
 		re := ref(remote)
 		_, isTwirpCall := remote.ExtraConfig[TwirpServiceIdentifierConst]
 		if isTwirpCall {
+			start := time.Now()
+			defer func(logger logging.Logger) {
+				elapsed := time.Since(start)
+				logger.Info("NewConfiguredBackendFactory time : %s", elapsed)
+			}(l)
 			twirpOpt := getTwirpOptions(remote)
 			if twirpOpt == nil {
 				log.Println("twirp: client factory is not used for", remote)

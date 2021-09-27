@@ -119,6 +119,11 @@ func NewConfiguredBackendFactory(l logging.Logger, ref func(*config.Backend) cli
 			}
 
 			return func(ctx context.Context, request *proxy.Request) (*proxy.Response, error) {
+				start := time.Now()
+				defer func(logger logging.Logger) {
+					elapsed := time.Since(start)
+					logger.Info("ProxyFunc time : %s", elapsed)
+				}(l)
 				req, err := convertProxyRequest2HttpRequest(request)
 				if err != nil {
 					return nil, err

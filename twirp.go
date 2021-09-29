@@ -12,12 +12,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/clbanning/mxj"
 	"github.com/google/martian"
 	"github.com/google/martian/parse"
 	"github.com/luraproject/lura/config"
 	"github.com/luraproject/lura/logging"
 	"github.com/luraproject/lura/proxy"
 	"github.com/luraproject/lura/transport/http/client"
+	"github.com/twitchtv/twirp"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
@@ -65,6 +67,8 @@ type (
 
 const (
 	TwirpServiceIdentifierConst = "twirp_service_identifier"
+
+	_contentTypeApplicationXML = "application/xml"
 )
 
 var (
@@ -243,7 +247,42 @@ func callService(ctx context.Context, request *http.Request, opts *twirpBackendO
 
 		resp, err := stub.Invoke(ctx, opts.serviceName, opts.method, in)
 		if err != nil {
-			return nil, err
+			l.Error(err, "function invocation failed")
+			twirpErrorCode := twirp.Internal
+			header := http.Header{}
+			twirpErr, ok := err.(twirp.Error)
+			if ok {
+				errData := make(map[string]interface{})
+				errData["code"] = twirpErr.Code()
+				errData["msg"] = twirpErr.Msg()
+				errData["meta"] = twirpErr.MetaMap()
+				twirpErrorCode = twirpErr.Code()
+
+				statusCode := http.StatusInternalServerError
+				statusCode = twirp.ServerHTTPStatusFromErrorCode(twirpErrorCode)
+
+				return &proxy.Response{
+					Data:       errData,
+					IsComplete: true,
+					Metadata: proxy.Metadata{
+						Headers:    header,
+						StatusCode: statusCode,
+					},
+				}, nil
+			}
+
+			errData := make(map[string]interface{})
+			errData["code"] = twirpErrorCode
+			errData["msg"] = err.Error()
+
+			return &proxy.Response{
+				Data:       errData,
+				IsComplete: true,
+				Metadata: proxy.Metadata{
+					Headers:    header,
+					StatusCode: http.StatusInternalServerError,
+				},
+			}, nil
 		}
 
 		str := protojson.Format(resp)
@@ -381,19 +420,28 @@ func modifyProxyResponse(mod martian.ResponseModifier, request *http.Request, re
 		return err
 	}
 
-	if len(modifiedResponseBytes) <= 0 {
-		modifiedResponseBytes = []byte(`{}`)
-	}
-
 	var data map[string]interface{}
-	err = json.Unmarshal(modifiedResponseBytes, &data)
-	if err != nil {
-		return err
+	switch request.Header.Get("Content-Type") {
+	case _contentTypeApplicationXML:
+		mv, err := mxj.NewMapXml(modifiedResponseBytes)
+		if err != nil {
+			return err
+		}
+		data = mv
+	default:
+		if len(modifiedResponseBytes) <= 0 {
+			modifiedResponseBytes = []byte(`{}`)
+		}
+		err = json.Unmarshal(modifiedResponseBytes, &data)
+		if err != nil {
+			return err
+		}
 	}
 
 	resp.Data = data
 	resp.Metadata.Headers = httpResponse.Header
 	resp.Metadata.StatusCode = httpResponse.StatusCode
+	resp.Io = proxy.NewReadCloserWrapper(request.Context(), ioutil.NopCloser(bytes.NewBuffer(modifiedResponseBytes)))
 	resp.IsComplete = true
 	return nil
 }
